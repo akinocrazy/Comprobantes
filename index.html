@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Turnos</title>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.js"></script>
+<style>
+:root{--bg:#efeae2;--card:#fff;--bub:#d9fdd3;--tx:#111;--mut:#667781;--acc:#128c7e;--bad:#c0392b;--bd:#d8d8d8}
+@media(prefers-color-scheme:dark){:root{--bg:#0b141a;--card:#202c33;--bub:#005c4b;--tx:#e9edef;--mut:#8696a0;--acc:#25d3a8;--bad:#ff6b5b;--bd:#33414a}}
+*{box-sizing:border-box}html,body{height:100%;margin:0}
+body{background:var(--bg);color:var(--tx);font:16px/1.4 system-ui,sans-serif}
+#app{display:flex;flex-direction:column;height:100%}
+header{background:var(--card);padding:10px 14px;display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid var(--bd)}
+header small,.row span,.msg small{color:var(--mut);font-size:12px;display:block}
+.tot{font-weight:800;font-size:22px;color:var(--acc)}
+#chat{flex:1;overflow:auto;padding:12px;display:flex;flex-direction:column;gap:8px}
+.msg{background:var(--card);border-radius:12px;padding:6px;max-width:80%;align-self:flex-start}
+.msg.me{background:var(--bub);align-self:flex-end}
+.msg img{display:block;max-width:100%;max-height:220px;border-radius:8px}
+.row{display:flex;justify-content:space-between;gap:10px;align-items:center;padding:4px}
+.amt{font-weight:700;font-size:18px;background:none;border:0;color:var(--tx);border-bottom:1px dashed var(--mut);padding:2px;cursor:pointer}
+.bar{background:var(--card);padding:10px;display:flex;gap:8px;border-top:1px solid var(--bd);padding-bottom:calc(10px + env(safe-area-inset-bottom,0px))}
+button,label.b{font:inherit;border:0;border-radius:22px;padding:12px 16px;background:var(--acc);color:#fff;font-weight:600;cursor:pointer;text-align:center;flex:1}
+button.r{background:var(--bad)}button.s{background:var(--card);color:var(--tx);border:1px solid var(--bd)}
+.box{padding:18px;max-width:460px;margin:0 auto;display:flex;flex-direction:column;gap:10px;overflow:auto}
+.box input{font:inherit;padding:12px;border:1px solid var(--bd);border-radius:10px;background:var(--card);color:var(--tx)}
+.e{color:var(--bad);margin:0}
+#f,#fc{position:absolute;left:-9999px;width:1px;height:1px;opacity:0}
+</style>
+</head>
+<body>
+<div id="app"></div>
+<input type="file" id="f" accept="image/*" multiple onchange="subir(this)">
+<input type="file" id="fc" accept="image/*" capture="environment" onchange="subir(this)">
+<script>
+// 1) PEGA AQUÍ los dos datos de tu proyecto de Supabase
+const SB_URL = 'https://rejdhzniffqgcqzbkhmt.supabase.co';
+const SB_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InJlamRoem5pZmZxZ2NxemJraG10Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTIzNzAxMzMsImV4cCI6MjEwNzk0NjEzM30.xw-5ha16P6UA-azzV1yIvNJgJ1o4odBCWPl_OxBk2OY';
+
+const sb = supabase.createClient(SB_URL, SB_KEY);
+const $ = s => document.querySelector(s), app = $('#app');
+const fmt = n => '$' + Math.round(n || 0).toLocaleString('es-CO');
+const hm = t => new Date(t).toLocaleTimeString('es-CO', { hour: '2-digit', minute: '2-digit' });
+const h = x => { app.innerHTML = x };
+let me, neg, turno, uid, items = [], rd = new Set(), rep = 0;
+
+function login(msg = '') {
+  h(`<div class="box"><h2>Turnos</h2><p class="e">${msg}</p>
+  <h3>Soy empleado</h3><input id="c" placeholder="Código del negocio"><input id="n" placeholder="Tu nombre"><button onclick="emp()">Entrar</button>
+  <h3>Soy dueño</h3><input id="em" type="email" placeholder="Correo"><input id="pw" type="password" placeholder="Contraseña (mínimo 6)">
+  <input id="nn" placeholder="Nombre del negocio (solo para registrarte)"><input id="no" placeholder="Tu nombre">
+  <button onclick="due(1)">Registrar mi negocio</button><button class="s" onclick="due(0)">Ya tengo cuenta</button></div>`);
+}
+async function emp() {
+  try {
+    const a = await sb.auth.signInAnonymously(); if (a.error) throw a.error;
+    const r = await sb.rpc('unirse', { c: $('#c').value, mi_nombre: $('#n').value.trim() }); if (r.error) throw r.error;
+    start();
+  } catch (e) { login(e.message); }
+}
+async function due(reg) {
+  try {
+    const em = $('#em').value, pw = $('#pw').value;
+    if (reg) {
+      const a = await sb.auth.signUp({ email: em, password: pw }); if (a.error) throw a.error;
+      const r = await sb.rpc('crear_negocio', { n: $('#nn').value.trim(), mi_nombre: $('#no').value.trim() }); if (r.error) throw r.error;
+    } else {
+      const a = await sb.auth.signInWithPassword({ email: em, password: pw }); if (a.error) throw a.error;
+    }
+    start();
+  } catch (e) { login(e.message); }
+}
+async function start() {
+  const { data: { session } } = await sb.auth.getSession();
+  if (!session) return login();
+  uid = session.user.id;
+  const { data: m } = await sb.from('miembros').select('nombre,rol,negocios(id,nombre,codigo)').eq('user_id', uid).maybeSingle();
+  if (!m) return login('Tu usuario no pertenece a ningún negocio');
+  me = m; neg = m.negocios;
+  const ch = sb.channel('neg');
+  ['transferencias', 'turnos'].forEach(t => ch.on('postgres_changes', { event: '*', schema: 'public', table: t, filter: 'negocio_id=eq.' + neg.id }, load));
+  ch.subscribe();
+  load();
+}
+async function load() {
+  if (rep) return;
+  const { data: t } = await sb.from('turnos').select('*').eq('negocio_id', neg.id).is('cerrado_en', null).limit(1).maybeSingle();
+  turno = t; items = [];
+  if (t) {
+    const { data } = await sb.from('transferencias').select('*').eq('turno_id', t.id).order('creado_en');
+    items = data || [];
+    if (items.length) {
+      const { data: u } = await sb.storage.from('fotos').createSignedUrls(items.map(i => i.foto), 3600);
+      (u || []).forEach((x, i) => items[i].url = x.signedUrl);
+    }
+  }
+  draw();
+}
+function draw() {
+  const tot = items.reduce((a, i) => a + (+i.monto || 0), 0);
+  h(`<header><div><b>${neg.nombre}</b><small>${turno ? 'Turno abierto ' + hm(turno.abierto_en) + ' · ' + items.length + ' transf.' : 'Sin turno abierto'}${me.rol == 'dueno' ? ' · Código: ' + neg.codigo : ''}</small></div><div class="tot">${fmt(tot)}</div></header>
+  <div id="chat">${items.map(i => `<div class="msg ${i.user_id == uid ? 'me' : ''}"><small>${i.nombre || ''}</small><img src="${i.url || ''}"><div class="row"><button class="amt" onclick="edit('${i.id}')">${i.monto == null ? (rd.has(i.id) ? 'Leyendo…' : 'Toca para escribir monto') : fmt(i.monto)}</button><span>${hm(i.creado_en)}</span></div></div>`).join('') || '<p class="e" style="color:var(--mut);text-align:center">Aún no hay transferencias</p>'}</div>
+  <div class="bar">${turno ? '<label class="b" for="fc">📷 Foto</label><label class="b" for="f">🖼️ Galería</label><button class="r" onclick="cerrar()">Cerrar turno</button>' : '<button onclick="abrir()">Abrir turno</button>'}</div>`);
+  const c = $('#chat'); if (c) c.scrollTop = 1e9;
+}
+function shrink(file) {
+  return new Promise((res, rej) => {
+    const u = URL.createObjectURL(file), i = new Image();
+    i.onload = () => { const s = Math.min(1, 1400 / Math.max(i.width, i.height)), c = document.createElement('canvas'); c.width = i.width * s; c.height = i.height * s; c.getContext('2d').drawImage(i, 0, 0, c.width, c.height); URL.revokeObjectURL(u); c.toBlob(b => b ? res(b) : rej(), 'image/jpeg', .85); };
+    i.onerror = rej; i.src = u;
+  });
+}
+async function subir(el) {
+  const fs = [...el.files]; el.value = '';
+  for (const f of fs) {
+    const b = await shrink(f), p = neg.id + '/' + crypto.randomUUID() + '.jpg';
+    const up = await sb.storage.from('fotos').upload(p, b, { contentType: 'image/jpeg' }); if (up.error) { alert(up.error.message); continue; }
+    const ins = await sb.from('transferencias').insert({ negocio_id: neg.id, turno_id: turno.id, nombre: me.nombre, foto: p }).select().single(); if (ins.error) { alert(ins.error.message); continue; }
+    rd.add(ins.data.id); leer(ins.data, b);
+  }
+}
+async function leer(r, b) {
+  try {
+    const s = (await sb.auth.getSession()).data.session;
+    const img = await new Promise(o => { const fr = new FileReader(); fr.onload = () => o(fr.result.split(',')[1]); fr.readAsDataURL(b); });
+    const x = await (await fetch('/api/leer', { method: 'POST', headers: { 'content-type': 'application/json', authorization: 'Bearer ' + s.access_token }, body: JSON.stringify({ imagen: img }) })).json();
+    const m = Number(x.monto);
+    await sb.from('transferencias').update({ monto: m > 0 ? Math.round(m) : null, referencia: x.referencia || null }).eq('id', r.id);
+  } catch (e) {}
+  rd.delete(r.id); load();
+}
+async function edit(id) {
+  const v = prompt('Monto de la transferencia (solo números):'); if (v === null) return;
+  const n = parseInt(v.replace(/\D/g, ''));
+  await sb.from('transferencias').update({ monto: isNaN(n) ? null : n }).eq('id', id); load();
+}
+async function abrir() { const r = await sb.from('turnos').insert({ negocio_id: neg.id }); if (r.error) alert(r.error.message); load(); }
+async function cerrar() {
+  if (rd.size) return alert('Espera: aún se están leyendo montos.');
+  if (!confirm('¿Cerrar el turno?')) return;
+  rep = 1; const it = items, t = turno;
+  await sb.from('turnos').update({ cerrado_en: new Date().toISOString() }).eq('id', t.id);
+  const by = {}, tot = it.reduce((a, i) => a + (+i.monto || 0), 0), sin = it.filter(i => i.monto == null).length;
+  it.forEach(i => by[i.nombre] = (by[i.nombre] || 0) + (+i.monto || 0));
+  h(`<div class="box"><h2>Reporte del turno</h2><span>${new Date(t.abierto_en).toLocaleString('es-CO')} → ${hm(Date.now())}</span>
+  <div class="tot" style="font-size:34px">${fmt(tot)}</div><span>${it.length} transferencias${sin ? ' · ⚠️ ' + sin + ' sin monto (no se suman)' : ''}</span>
+  <h3>Por empleado</h3>${Object.entries(by).map(([k, v]) => `<div class="row"><span>${k}</span><b>${fmt(v)}</b></div>`).join('')}
+  <h3>Detalle</h3>${it.map((i, n) => `<div class="row"><span>${n + 1}. ${hm(i.creado_en)} · ${i.nombre}</span><b>${i.monto == null ? '—' : fmt(i.monto)}</b></div>`).join('')}
+  <button onclick="rep=0;load()">Listo</button></div>`);
+}
+start();
+</script>
+</body>
+</html>
