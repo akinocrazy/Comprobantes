@@ -36,14 +36,14 @@ button.r{background:var(--bad)}button.s{background:var(--card);color:var(--tx);b
 <script>
 // 1) PEGA AQUÍ los dos datos de tu proyecto de Supabase
 const SB_URL = 'https://rejdhzniffqgcqzbkhmt.supabase.co';
-const SB_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InJlamRoem5pZmZxZ2NxemJraG10Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTIzNzAxMzMsImV4cCI6MjEwNzk0NjEzM30.xw-5ha16P6UA-azzV1yIvNJgJ1o4odBCWPl_OxBk2OY';
+const SB_KEY = 'sb_publishable_ufIXtSIkkSlzGW1C5XhxTA_2Y-qp_Pq';
 
 const sb = supabase.createClient(SB_URL, SB_KEY);
 const $ = s => document.querySelector(s), app = $('#app');
 const fmt = n => '$' + Math.round(n || 0).toLocaleString('es-CO');
 const hm = t => new Date(t).toLocaleTimeString('es-CO', { hour: '2-digit', minute: '2-digit' });
 const h = x => { app.innerHTML = x };
-let me, neg, turno, uid, items = [], rd = new Set(), rep = 0;
+let me, neg, turno, uid, items = [], rd = new Set(), rep = 0, errs = {};
 
 function login(msg = '') {
   h(`<div class="box"><h2>Turnos</h2><p class="e">${msg}</p>
@@ -99,8 +99,8 @@ async function load() {
 }
 function draw() {
   const tot = items.reduce((a, i) => a + (+i.monto || 0), 0);
-  h(`<header><div><b>${neg.nombre}</b><small>${turno ? 'Turno abierto ' + hm(turno.abierto_en) + ' · ' + items.length + ' transf.' : 'Sin turno abierto'}${me.rol == 'dueno' ? ' · Código: ' + neg.codigo : ''}</small></div><div class="tot">${fmt(tot)}</div></header>
-  <div id="chat">${items.map(i => `<div class="msg ${i.user_id == uid ? 'me' : ''}"><small>${i.nombre || ''}</small><img src="${i.url || ''}"><div class="row"><button class="amt" onclick="edit('${i.id}')">${i.monto == null ? (rd.has(i.id) ? 'Leyendo…' : 'Toca para escribir monto') : fmt(i.monto)}</button><span>${hm(i.creado_en)}</span></div></div>`).join('') || '<p class="e" style="color:var(--mut);text-align:center">Aún no hay transferencias</p>'}</div>
+  h(`<header><div><b>${neg.nombre}</b><small>${turno ? 'Turno abierto ' + hm(turno.abierto_en) + ' · ' + items.length + ' transf.' : 'Sin turno abierto'}${me.rol == 'dueno' ? ' · Código: ' + neg.codigo : ''}</small></div><div style="text-align:right"><div class="tot">${fmt(tot)}</div><button class="s" style="padding:4px 12px;font-size:13px" onclick="salir()">Salir</button></div></header>
+  <div id="chat">${items.map(i => `<div class="msg ${i.user_id == uid ? 'me' : ''}"><small>${i.nombre || ''}</small><img src="${i.url || ''}"><div class="row"><button class="amt" onclick="edit('${i.id}')">${i.monto == null ? (rd.has(i.id) ? 'Leyendo…' : (errs[i.id] ? 'No se pudo leer (' + errs[i.id] + '). Toca para escribir' : 'Toca para escribir monto')) : fmt(i.monto)}</button><span>${hm(i.creado_en)}</span></div></div>`).join('') || '<p class="e" style="color:var(--mut);text-align:center">Aún no hay transferencias</p>'}</div>
   <div class="bar">${turno ? '<label class="b" for="fc">📷 Foto</label><label class="b" for="f">🖼️ Galería</label><button class="r" onclick="cerrar()">Cerrar turno</button>' : '<button onclick="abrir()">Abrir turno</button>'}</div>`);
   const c = $('#chat'); if (c) c.scrollTop = 1e9;
 }
@@ -125,9 +125,10 @@ async function leer(r, b) {
     const s = (await sb.auth.getSession()).data.session;
     const img = await new Promise(o => { const fr = new FileReader(); fr.onload = () => o(fr.result.split(',')[1]); fr.readAsDataURL(b); });
     const x = await (await fetch('/api/leer', { method: 'POST', headers: { 'content-type': 'application/json', authorization: 'Bearer ' + s.access_token }, body: JSON.stringify({ imagen: img }) })).json();
+    if (x.error) errs[r.id] = x.error;
     const m = Number(x.monto);
     await sb.from('transferencias').update({ monto: m > 0 ? Math.round(m) : null, referencia: x.referencia || null }).eq('id', r.id);
-  } catch (e) {}
+  } catch (e) { errs[r.id] = 'no responde /api/leer'; }
   rd.delete(r.id); load();
 }
 async function edit(id) {
@@ -135,6 +136,7 @@ async function edit(id) {
   const n = parseInt(v.replace(/\D/g, ''));
   await sb.from('transferencias').update({ monto: isNaN(n) ? null : n }).eq('id', id); load();
 }
+async function salir() { if (!confirm('¿Salir de esta cuenta?')) return; await sb.auth.signOut(); location.reload(); }
 async function abrir() { const r = await sb.from('turnos').insert({ negocio_id: neg.id }); if (r.error) alert(r.error.message); load(); }
 async function cerrar() {
   if (rd.size) return alert('Espera: aún se están leyendo montos.');
