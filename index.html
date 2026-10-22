@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Turnos</title>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
 <style>
 :root{--bg:#efeae2;--card:#fff;--bub:#d9fdd3;--tx:#111;--mut:#667781;--acc:#128c7e;--bad:#c0392b;--bd:#d8d8d8}
 @media(prefers-color-scheme:dark){:root{--bg:#0b141a;--card:#202c33;--bub:#005c4b;--tx:#e9edef;--mut:#8696a0;--acc:#25d3a8;--bad:#ff6b5b;--bd:#33414a}}
@@ -26,6 +27,7 @@ button.r{background:var(--bad)}button.s{background:var(--card);color:var(--tx);b
 .box{padding:18px;max-width:460px;margin:0 auto;display:flex;flex-direction:column;gap:10px;overflow:auto}
 .box input{font:inherit;padding:12px;border:1px solid var(--bd);border-radius:10px;background:var(--card);color:var(--tx)}
 .e{color:var(--bad);margin:0}
+button:disabled{opacity:.6}
 #f,#fc{position:absolute;left:-9999px;width:1px;height:1px;opacity:0}
 </style>
 </head>
@@ -33,17 +35,15 @@ button.r{background:var(--bad)}button.s{background:var(--card);color:var(--tx);b
 <div id="app"></div>
 <input type="file" id="f" accept="image/*" multiple onchange="subir(this)">
 <input type="file" id="fc" accept="image/*" capture="environment" onchange="subir(this)">
+<script src="config.js"></script>
 <script>
-// 1) PEGA AQUÍ los dos datos de tu proyecto de Supabase
-const SB_URL = 'https://rejdhzniffqgcqzbkhmt.supabase.co';
-const SB_KEY = 'sb_publishable_ufIXtSIkkSlzGW1C5XhxTA_2Y-qp_Pq';
 
 const sb = supabase.createClient(SB_URL, SB_KEY);
 const $ = s => document.querySelector(s), app = $('#app');
 const fmt = n => '$' + Math.round(n || 0).toLocaleString('es-CO');
 const hm = t => new Date(t).toLocaleTimeString('es-CO', { hour: '2-digit', minute: '2-digit' });
 const h = x => { app.innerHTML = x };
-let me, neg, turno, uid, items = [], rd = new Set(), rep = 0, errs = {};
+let me, neg, turno, uid, items = [], rd = new Set(), rep = 0, errs = {}, repFiles = null;
 
 function login(msg = '') {
   h(`<div class="box"><h2>Turnos</h2><p class="e">${msg}</p>
@@ -115,8 +115,11 @@ async function subir(el) {
   const fs = [...el.files]; el.value = '';
   for (const f of fs) {
     const b = await shrink(f), p = neg.id + '/' + crypto.randomUUID() + '.jpg';
+    const hu = await huella(b);
+    const dp = await sb.from('transferencias').select('id').eq('negocio_id', neg.id).eq('huella', hu).limit(1);
+    if (dp.data && dp.data.length) { alert('⚠️ Esta foto ya fue enviada. No se agregó.'); continue; }
     const up = await sb.storage.from('fotos').upload(p, b, { contentType: 'image/jpeg' }); if (up.error) { alert(up.error.message); continue; }
-    const ins = await sb.from('transferencias').insert({ negocio_id: neg.id, turno_id: turno.id, nombre: me.nombre, foto: p }).select().single(); if (ins.error) { alert(ins.error.message); continue; }
+    const ins = await sb.from('transferencias').insert({ negocio_id: neg.id, turno_id: turno.id, nombre: me.nombre, foto: p, huella: hu }).select().single(); if (ins.error) { await sb.storage.from('fotos').remove([p]); alert(ins.error.code === '23505' ? '⚠️ Esta foto ya fue enviada. No se agregó.' : ins.error.message); continue; }
     rd.add(ins.data.id); leer(ins.data, b);
   }
 }
@@ -127,7 +130,12 @@ async function leer(r, b) {
     const x = await (await fetch('/api/leer', { method: 'POST', headers: { 'content-type': 'application/json', authorization: 'Bearer ' + s.access_token }, body: JSON.stringify({ imagen: img }) })).json();
     if (x.error) errs[r.id] = x.error;
     const m = Number(x.monto);
-    await sb.from('transferencias').update({ monto: m > 0 ? Math.round(m) : null, referencia: x.referencia || null }).eq('id', r.id);
+    const ref = x.referencia ? String(x.referencia).replace(/\s+/g, '').toUpperCase() : null;
+    const up = await sb.from('transferencias').update({ monto: m > 0 ? Math.round(m) : null, referencia: ref }).eq('id', r.id);
+    if (up.error && up.error.code === '23505') {
+      await sb.from('transferencias').delete().eq('id', r.id); await sb.storage.from('fotos').remove([r.foto]);
+      alert('⚠️ Esta transferencia ya fue enviada antes (misma referencia). Se eliminó la repetida.');
+    }
   } catch (e) { errs[r.id] = 'no responde /api/leer'; }
   rd.delete(r.id); load();
 }
@@ -149,7 +157,36 @@ async function cerrar() {
   <div class="tot" style="font-size:34px">${fmt(tot)}</div><span>${it.length} transferencias${sin ? ' · ⚠️ ' + sin + ' sin monto (no se suman)' : ''}</span>
   <h3>Por empleado</h3>${Object.entries(by).map(([k, v]) => `<div class="row"><span>${k}</span><b>${fmt(v)}</b></div>`).join('')}
   <h3>Detalle</h3>${it.map((i, n) => `<div class="row"><span>${n + 1}. ${hm(i.creado_en)} · ${i.nombre}</span><b>${i.monto == null ? '—' : fmt(i.monto)}</b></div>`).join('')}
-  <button onclick="rep=0;load()">Listo</button></div>`);
+  <button class="fb" data-t="💾 Guardar fotos en el teléfono" onclick="guardarFotos()" disabled>Preparando fotos…</button><button class="fb s" data-t="Descargar zip" onclick="bajarZip()" disabled>Preparando…</button><button class="s" onclick="rep=0;load()">Listo</button></div>`);
+  repFiles = null;
+  fotos(it).then(f => { repFiles = f; document.querySelectorAll('.fb').forEach(b => { b.disabled = false; b.textContent = b.dataset.t; }); });
+}
+async function fotos(it) {
+  const out = [];
+  for (let i = 0; i < it.length; i++) {
+    const { data } = await sb.storage.from('fotos').download(it[i].foto);
+    if (data) out.push(new File([data], 'transferencia_' + String(i + 1).padStart(2, '0') + '_' + (it[i].monto ?? 'sin-monto') + '.jpg', { type: 'image/jpeg' }));
+  }
+  return out;
+}
+async function guardarFotos() {
+  const f = repFiles || [];
+  if (!f.length) return alert('No hay fotos para guardar.');
+  if (navigator.canShare && navigator.canShare({ files: f })) {
+    try { await navigator.share({ files: f, title: 'Transferencias del turno' }); return; } catch (e) { if (e.name === 'AbortError') return; }
+  }
+  bajarZip();
+}
+async function bajarZip() {
+  const f = repFiles || [];
+  if (!f.length) return alert('No hay fotos para guardar.');
+  const z = new JSZip(); f.forEach(x => z.file(x.name, x));
+  const b = await z.generateAsync({ type: 'blob' });
+  const a = document.createElement('a'); a.href = URL.createObjectURL(b); a.download = 'fotos_turno_' + new Date().toISOString().slice(0, 10) + '.zip'; a.click();
+}
+async function huella(b) {
+  const d = await crypto.subtle.digest('SHA-256', await b.arrayBuffer());
+  return [...new Uint8Array(d)].map(x => x.toString(16).padStart(2, '0')).join('');
 }
 start();
 </script>
