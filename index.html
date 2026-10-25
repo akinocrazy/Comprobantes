@@ -4,6 +4,9 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Turnos</title>
+<link rel="manifest" href="manifest.json">
+<meta name="theme-color" content="#128c7e">
+<link rel="apple-touch-icon" href="icon-192.png">
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
 <style>
@@ -28,6 +31,7 @@ button.r{background:var(--bad)}button.s{background:var(--card);color:var(--tx);b
 .box input{font:inherit;padding:12px;border:1px solid var(--bd);border-radius:10px;background:var(--card);color:var(--tx)}
 .e{color:var(--bad);margin:0}
 button:disabled{opacity:.6}
+.mini{flex:none;padding:3px 10px;font-size:12px;border-radius:14px}
 #f,#fc{position:absolute;left:-9999px;width:1px;height:1px;opacity:0}
 </style>
 </head>
@@ -80,6 +84,7 @@ async function start() {
   me = m; neg = m.negocios;
   const ch = sb.channel('neg');
   ['transferencias', 'turnos'].forEach(t => ch.on('postgres_changes', { event: '*', schema: 'public', table: t, filter: 'negocio_id=eq.' + neg.id }, load));
+  ch.on('postgres_changes', { event: 'DELETE', schema: 'public', table: 'transferencias' }, load);
   ch.subscribe();
   load();
 }
@@ -99,8 +104,9 @@ async function load() {
 }
 function draw() {
   const tot = items.reduce((a, i) => a + (+i.monto || 0), 0);
-  h(`<header><div><b>${neg.nombre}</b><small>${turno ? 'Turno abierto ' + hm(turno.abierto_en) + ' · ' + items.length + ' transf.' : 'Sin turno abierto'}${me.rol == 'dueno' ? ' · Código: ' + neg.codigo : ''}</small></div><div style="text-align:right"><div class="tot">${fmt(tot)}</div><button class="s" style="padding:4px 12px;font-size:13px" onclick="salir()">Salir</button></div></header>
-  <div id="chat">${items.map(i => `<div class="msg ${i.user_id == uid ? 'me' : ''}"><small>${i.nombre || ''}</small><img src="${i.url || ''}"><div class="row"><button class="amt" onclick="edit('${i.id}')">${i.monto == null ? (rd.has(i.id) ? 'Leyendo…' : (errs[i.id] ? 'No se pudo leer (' + errs[i.id] + '). Toca para escribir' : 'Toca para escribir monto')) : fmt(i.monto)}</button><span>${hm(i.creado_en)}</span></div></div>`).join('') || '<p class="e" style="color:var(--mut);text-align:center">Aún no hay transferencias</p>'}</div>
+  const pend = items.filter(i => i.monto == null && !rd.has(i.id)).length;
+  h(`<header><div><b>${neg.nombre}</b><small>${turno ? 'Turno abierto ' + hm(turno.abierto_en) + ' · ' + items.length + ' transf.' : 'Sin turno abierto'}${me.rol == 'dueno' ? ' · Código: ' + neg.codigo : ''}</small></div><div style="text-align:right"><div class="tot">${fmt(tot)}</div>${pend ? `<button class="s mini" onclick="pendientes()">↻ Leer ${pend} pendientes</button> ` : ''}<button class="s" style="padding:4px 12px;font-size:13px" onclick="salir()">Salir</button></div></header>
+  <div id="chat">${items.map(i => `<div class="msg ${i.user_id == uid ? 'me' : ''}"><small>${i.nombre || ''}</small><img src="${i.url || ''}"><div class="row"><button class="amt" onclick="edit('${i.id}')">${i.monto == null ? (rd.has(i.id) ? (errs[i.id] ? 'Esperando cupo… reintento solo' : 'Leyendo…') : (errs[i.id] ? 'No se pudo leer (' + errs[i.id] + '). Toca para escribir' : 'Toca para escribir monto')) : fmt(i.monto)}</button><span>${hm(i.creado_en)}</span></div><div class="row">${i.monto == null && !rd.has(i.id) ? `<button class="s mini" onclick="reintentar('${i.id}')">↻ Reintentar</button>` : '<span></span>'}${me.rol == 'dueno' || i.user_id == uid ? `<button class="s mini" onclick="borrar('${i.id}')">🗑 Eliminar</button>` : ''}</div></div>`).join('') || '<p class="e" style="color:var(--mut);text-align:center">Aún no hay transferencias</p>'}</div>
   <div class="bar">${turno ? '<label class="b" for="fc">📷 Foto</label><label class="b" for="f">🖼️ Galería</label><button class="r" onclick="cerrar()">Cerrar turno</button>' : '<button onclick="abrir()">Abrir turno</button>'}</div>`);
   const c = $('#chat'); if (c) c.scrollTop = 1e9;
 }
@@ -120,15 +126,32 @@ async function subir(el) {
     if (dp.data && dp.data.length) { alert('⚠️ Esta foto ya fue enviada. No se agregó.'); continue; }
     const up = await sb.storage.from('fotos').upload(p, b, { contentType: 'image/jpeg' }); if (up.error) { alert(up.error.message); continue; }
     const ins = await sb.from('transferencias').insert({ negocio_id: neg.id, turno_id: turno.id, nombre: me.nombre, foto: p, huella: hu }).select().single(); if (ins.error) { await sb.storage.from('fotos').remove([p]); alert(ins.error.code === '23505' ? '⚠️ Esta foto ya fue enviada. No se agregó.' : ins.error.message); continue; }
-    rd.add(ins.data.id); leer(ins.data, b);
+    encolar(ins.data, b);
   }
 }
+const cola = []; let corriendo = false;
+const dormir = ms => new Promise(r => setTimeout(r, ms));
+function encolar(r, b) { rd.add(r.id); cola.push({ r, b }); if (!corriendo) procesar(); }
+async function procesar() {
+  corriendo = true;
+  while (cola.length) { const t = cola.shift(); await leer(t.r, t.b); await dormir(1500); }
+  corriendo = false;
+}
+function reintentar(id) { const r = items.find(i => i.id == id); if (r && !rd.has(id)) { delete errs[id]; encolar(r, null); draw(); } }
+function pendientes() { items.filter(i => i.monto == null && !rd.has(i.id)).forEach(r => { delete errs[r.id]; encolar(r, null); }); draw(); }
 async function leer(r, b) {
-  try {
-    const s = (await sb.auth.getSession()).data.session;
-    const img = await new Promise(o => { const fr = new FileReader(); fr.onload = () => o(fr.result.split(',')[1]); fr.readAsDataURL(b); });
-    const x = await (await fetch('/api/leer', { method: 'POST', headers: { 'content-type': 'application/json', authorization: 'Bearer ' + s.access_token }, body: JSON.stringify({ imagen: img }) })).json();
-    if (x.error) errs[r.id] = x.error;
+  for (let n = 0; n < 6; n++) {
+    let x;
+    try {
+      if (!b) { const d = await sb.storage.from('fotos').download(r.foto); if (d.error) throw d.error; b = d.data; }
+      const s = (await sb.auth.getSession()).data.session;
+      const img = await new Promise(o => { const fr = new FileReader(); fr.onload = () => o(fr.result.split(',')[1]); fr.readAsDataURL(b); });
+      x = await (await fetch('/api/leer', { method: 'POST', headers: { 'content-type': 'application/json', authorization: 'Bearer ' + s.access_token }, body: JSON.stringify({ imagen: img }) })).json();
+    } catch (e) { x = { error: 'no responde /api/leer' }; }
+    if (x.error && /429|quota|503|UNAVAILABLE|overloaded|no responde/i.test(x.error) && n < 5) {
+      errs[r.id] = x.error; draw(); await dormir(20000); continue;
+    }
+    if (x.error) errs[r.id] = x.error; else delete errs[r.id];
     const m = Number(x.monto);
     const ref = x.referencia ? String(x.referencia).replace(/\s+/g, '').toUpperCase() : null;
     const up = await sb.from('transferencias').update({ monto: m > 0 ? Math.round(m) : null, referencia: ref }).eq('id', r.id);
@@ -136,8 +159,18 @@ async function leer(r, b) {
       await sb.from('transferencias').delete().eq('id', r.id); await sb.storage.from('fotos').remove([r.foto]);
       alert('⚠️ Esta transferencia ya fue enviada antes (misma referencia). Se eliminó la repetida.');
     }
-  } catch (e) { errs[r.id] = 'no responde /api/leer'; }
+    break;
+  }
   rd.delete(r.id); load();
+}
+async function borrar(id) {
+  const i = items.find(x => x.id == id); if (!i) return;
+  if (!confirm('¿Eliminar esta transferencia y su foto?')) return;
+  const d = await sb.from('transferencias').delete().eq('id', id).select();
+  if (d.error) return alert(d.error.message);
+  if (!d.data || !d.data.length) return alert('No tienes permiso para eliminar esta transferencia.');
+  await sb.storage.from('fotos').remove([i.foto]);
+  load();
 }
 async function edit(id) {
   const v = prompt('Monto de la transferencia (solo números):'); if (v === null) return;
@@ -188,6 +221,7 @@ async function huella(b) {
   const d = await crypto.subtle.digest('SHA-256', await b.arrayBuffer());
   return [...new Uint8Array(d)].map(x => x.toString(16).padStart(2, '0')).join('');
 }
+if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
 start();
 </script>
 </body>
